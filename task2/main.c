@@ -1,152 +1,201 @@
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
-#define FAT16_SECTOR_SIZE 512
+#include "linux/msdos_fs.h"
 
-// Структура для записи в каталоге
-typedef struct {
-  char filename[8];       // Имя файла (8 символов)
-  char extension[3];      // Расширение файла (3 символа)
-  uint8_t attributes;     // Атрибуты файла
-  uint8_t reserved;       // Зарезервировано
-  uint8_t createTime[2];  // Время создания (2 байта)
-  uint8_t createDate[2];  // Дата создания (2 байта)
-  uint8_t lastAccessDate[2];  // Дата последнего доступа (2 байта)
-  uint8_t lastWriteTime[2];  // Время последней записи (2 байта)
-  uint8_t lastWriteDate[2];  // Дата последней записи (2 байта)
-  uint16_t clusterStart;  // Номер начального кластера (2 байта)
-  uint16_t fileSize;  // Размер файла (2 байта)
-} DirectoryEntry;
+typedef struct msdos_dir_entry DirectoryEntry;
 
-// Структура для записи в таблице FAT
-typedef struct {
-  uint16_t cluster;  // Номер кластера
-} FATEntry;
+typedef struct fat_boot_sector FatBootSector;
 
-// Функция для вывода атрибутов файла
-void printAttributes(uint8_t attributes) {
-  printf(" ");
-  if (attributes & 0x01) printf("R");  // Только для чтения
-  if (attributes & 0x02) printf("H");  // Скрытый
-  if (attributes & 0x04) printf("S");  // Системный
-  if (attributes & 0x10) printf("A");  // Архивный
-  if (attributes & 0x20) printf("D");  // Каталог
-  if (attributes & 0x40) printf("V");  // Том
-  if (attributes & 0x80) printf("L");  // Метка тома
-}
+FatBootSector cur_boot;
 
-// Функция для вывода даты и времени
-void printDateTime(uint8_t *time, uint8_t *date) {
-  printf(" %02d.%02d.%04d %02d:%02d", date[1], date[0], 1980 + date[2],
-         (time[0] & 0x1f) << 1 | (time[1] & 0x80) >> 7, (time[1] & 0x7f) >> 1);
-}
+int set_fat_boot(int fd) {
+  char dir_entry_struct[sizeof(FatBootSector) + 1];
+  size_t size = 0;
 
-// Функция для чтения сектора из образа FAT16
-void readSector(FILE *file, int sector, char *buffer) {
-  fseek(file, sector * FAT16_SECTOR_SIZE, SEEK_SET);
-  fread(buffer, 1, FAT16_SECTOR_SIZE, file);
-}
-
-// Функция для чтения записи из таблицы FAT
-FATEntry readFATEntry(FILE *file, int cluster) {
-  FATEntry entry;
-  char sector[FAT16_SECTOR_SIZE];
-  int sectorIndex = cluster / 8;
-  int offset = (cluster % 8) * 2;
-  readSector(file, sectorIndex + 2, sector);
-  memcpy(&entry, sector + offset, sizeof(FATEntry));
-  return entry;
-}
-
-// Функция для чтения файла из образа FAT16
-void readFile(FILE *file, int clusterStart, int fileSize) {
-  char buffer[FAT16_SECTOR_SIZE];
-  int currentCluster = clusterStart;
-
-  while (fileSize > 0) {
-    readSector(file, currentCluster, buffer);
-    fwrite(buffer, 1, FAT16_SECTOR_SIZE, stdout);
-    fileSize -= FAT16_SECTOR_SIZE;
-    // Читаем следующий кластер
-    FATEntry entry = readFATEntry(file, currentCluster);
-    currentCluster = entry.cluster;
+  if ((size = read(fd, (char*)dir_entry_struct, sizeof(FatBootSector)) == -1)) {
+    perror("read");
+    printf("size = %lu %d %lu\n", size, size == sizeof(FatBootSector),
+           sizeof(FatBootSector));
+    return -1;
   }
+
+  memcpy(&cur_boot, dir_entry_struct, sizeof(FatBootSector));
+
+  return 0;
 }
 
-int main(int argc, char *argv[]) {
-  if (argc != 2) {
-    fprintf(stderr, "Usage: %s <image_file>\n", argv[0]);
+int get_sector_size() {
+  const int kByteMaxValue = 256;
+  return 0 + cur_boot.sector_size[0] + kByteMaxValue * cur_boot.sector_size[1];
+}
+
+int get_root_dir_size() {
+  const int kByteMaxValue = 256;
+  return 0 + cur_boot.dir_entries[0] + kByteMaxValue * cur_boot.dir_entries[1];
+}
+
+int get_dir_entries_offset() {
+  return (0 + cur_boot.reserved + (cur_boot.fats * cur_boot.fat_length)) * get_sector_size();
+}
+
+int get_reserved() { return cur_boot.reserved; }
+
+int get_cluster_size() { return get_sector_size() * cur_boot.sec_per_clus; }
+
+int get_fat_lenght() { return get_sector_size() * cur_boot.fat_length; }
+
+int get_num_of_sectors() {
+  const int kByteMaxValue = 256;
+  return 0 + cur_boot.sectors[0] + kByteMaxValue * cur_boot.sectors[1];
+}
+
+int get_data_offset() {
+  return get_dir_entries_offset() + get_root_dir_size() * sizeof(DirectoryEntry);
+}
+
+int print_root_files(int fd) {
+  const int kDirListingOffset = get_dir_entries_offset();
+  for (int i = 0;; ++i) {
+    DirectoryEntry dir_entry = {};
+    char dir_entry_struct[sizeof(DirectoryEntry) + 1];
+    size_t size = 0;
+
+    if ((size = pread(fd, (char*)dir_entry_struct, sizeof(DirectoryEntry),
+                      (size_t)kDirListingOffset + (2 * i + 1) * sizeof(DirectoryEntry))) != 32) {
+      perror("pread");
+      return -1;
+    }
+
+    memcpy(&dir_entry, dir_entry_struct, sizeof(DirectoryEntry));
+
+    if (dir_entry.name[0] == '\0') {
+      break;
+    }
+
+    printf(
+        "file name is: %s attr: %d created time: %d created date: %d last "
+        "access: %d\n",
+        dir_entry.name, dir_entry.attr, dir_entry.ctime, dir_entry.cdate,
+        dir_entry.adate);
+  }
+  return 0;
+}
+
+int cat_file(int fd, char* file_name) {
+  if (!file_name) return -1;
+
+  const int kDirListingOffset = get_dir_entries_offset();
+  const int kSectorSize = get_sector_size();
+  const int kReserved = get_reserved();
+  short cur_file_start_id = -1;
+  int cur_file_size = -1;
+
+  for (int i = 0; ; ++i) {
+    DirectoryEntry dir_entry = {};
+    char dir_entry_struct[sizeof(DirectoryEntry) + 1];
+    size_t size = 0;
+
+    if ((size = pread(fd, (char*)dir_entry_struct, sizeof(DirectoryEntry),
+                      (size_t)kDirListingOffset + (2 * i + 1) * sizeof(DirectoryEntry))) != 32) {
+      perror("pread");
+      return -1;
+    }
+
+    memcpy(&dir_entry, dir_entry_struct, sizeof(DirectoryEntry));
+
+    if (dir_entry.name[0] == '\0') {
+      // not found
+      return -1;
+    }
+    if (strncmp(dir_entry.name, file_name, (strlen(file_name) > strlen(dir_entry.name)) ? strlen(dir_entry.name) : strlen(file_name))) {
+      continue;
+    }
+
+    cur_file_start_id = dir_entry.start;
+    cur_file_size = dir_entry.size;
+    break;
+  }
+
+  if (cur_file_start_id == -1) {
+    return -1;
+  }
+
+  const int kClusterSize = get_cluster_size();
+  const int kDataFATOffset = kReserved * kSectorSize;
+  const int kNumOfBytes = 2;
+  const int kByteMaxValue = 256;
+  unsigned char cluster_id_buff[3];
+
+
+  char* file_data = (char*)malloc(sizeof(char) * (get_cluster_size() + 1));
+  if (!file_data) {
+    perror("malloc");
+    return -1;
+  }
+
+  int cur_cluster_start = cur_file_start_id;
+
+  while (1) {
+    const int cur_offset =
+        get_data_offset() + (cur_cluster_start - 2) * get_cluster_size();
+
+    if (pread(fd, file_data, get_cluster_size(), cur_offset) != get_cluster_size()) {
+      free(file_data);
+      perror("pread");
+      return -1;
+    }
+    printf("%s", file_data);
+
+    if (pread(fd, cluster_id_buff, 2,
+              kDataFATOffset + (cur_cluster_start * kNumOfBytes)) != 2) {
+      perror("pread");
+      return -1;
+    }
+
+    cur_cluster_start =
+        0 + cluster_id_buff[0] + kByteMaxValue * cluster_id_buff[1];
+
+    if (cur_cluster_start == 0xFFFF) {
+      break;
+    }
+  }
+  
+  free(file_data);
+  return 0;
+}
+
+int main() {
+  const char* file_name =
+      "/home/kanat/mipt7/mipt_1/mipt_file_systems/task2/floppy.img";
+
+  int fd = open(file_name, O_RDONLY, S_IRUSR);
+
+  if (fd == -1) {
+    perror("open");
+    return 1;
+  }
+  // get the structure
+  if (set_fat_boot(fd) != 0) {
+    close(fd);
+    return 1;
+  }
+  // get dir contains
+  if (print_root_files(fd) != 0) {
+    close(fd);
+    return 1;
+  }
+  // get file contains
+  if (cat_file(fd, "MAIN    C   ") != 0) {
+    close(fd);
     return 1;
   }
 
-  FILE *file = fopen(argv[1], "rb");
-  if (file == NULL) {
-    fprintf(stderr, "Error opening file: %s\n", argv[1]);
-    return 1;
-  }
+  close(fd);
 
-  // Читаем корневой каталог
-  char directory[FAT16_SECTOR_SIZE * 32];
-  readSector(
-      file, 19,
-      directory);  // Предположим, что корневой каталог начинается с сектора 19
-
-  // Выводим список файлов
-  int i = 0;
-  while (i < 32 * FAT16_SECTOR_SIZE) {
-    DirectoryEntry entry;
-    memcpy(&entry, directory + i, sizeof(DirectoryEntry));
-    // Если запись не пуста
-    if (entry.filename[0] != 0xe5 && entry.filename[0] != 0x00) {
-      // Вывод имени файла
-      printf("%s.%s", entry.filename, entry.extension);
-
-      // Вывод атрибутов
-      printAttributes(entry.attributes);
-
-      // Вывод даты и времени создания/изменения
-      printDateTime(entry.createTime, entry.createDate);
-      printf(" ");
-      printDateTime(entry.lastWriteTime, entry.lastWriteDate);
-
-      // Вывод размера файла
-      printf(" %u", entry.fileSize);
-
-      printf("\n");
-    }
-    i += sizeof(DirectoryEntry);
-  }
-
-  // Чтение файла
-  char filename[12];
-  printf("Введите имя файла для чтения: ");
-  scanf("%s", filename);
-
-  // Поиск записи файла
-  int found = 0;
-  i = 0;
-  while (i < 32 * FAT16_SECTOR_SIZE) {
-    DirectoryEntry entry;
-    memcpy(&entry, directory + i, sizeof(DirectoryEntry));
-    // Если запись не пуста
-    if (entry.filename[0] != 0xe5 && entry.filename[0] != 0x00) {
-      // Сравнение имени файла
-      if (strncmp(filename, entry.filename, 8) == 0 &&
-          strncmp(filename + 8, entry.extension, 3) == 0) {
-        found = 1;
-        readFile(file, entry.clusterStart, entry.fileSize);
-        break;
-      }
-    }
-    i += sizeof(DirectoryEntry);
-  }
-
-  if (!found) {
-    printf("Файл не найден\n");
-  }
-
-  fclose(file);
   return 0;
 }
