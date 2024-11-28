@@ -1,5 +1,6 @@
 #include "ext2_parser.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -9,7 +10,25 @@
 
 #include "ext2_fs.h"
 #define INODE_TYPE_MASK 0xf000
+
+#define OT_X 0x001
+#define OT_W 0x002
+#define OT_R 0x004
+#define GR_X 0x008
+#define GR_W 0x010
+#define GR_R 0x020
+#define US_X 0x040
+#define US_W 0x080
+#define US_R 0x100
+#define STIKY_BIT 0x200
+
+#define INODE_TYPE_FIFO 0x1000
+#define INODE_TYPE_CHAR_DEV 0x2000
 #define INODE_TYPE_DIR 0x4000
+#define INODE_TYPE_BLOCK_DEV 0x6000
+#define INODE_TYPE_REG_FILE 0x8000
+#define INODE_TYPE_SYM_LINK 0xa000
+#define INODE_TYPE_SOCKET 0xc000
 
 typedef struct {
   int type;
@@ -27,6 +46,31 @@ typedef struct {
   int num;
   char *name;
 } DirEntry;
+
+void set_permission(char *perm, int type) {
+  perm[0] = (type & US_X) ? 'x' : '-';
+  perm[1] = (type & US_W) ? 'w' : '-';
+  perm[2] = (type & US_R) ? 'r' : '-';
+  perm[3] = (type & GR_X) ? 'x' : '-';
+  perm[4] = (type & GR_W) ? 'w' : '-';
+  perm[5] = (type & GR_R) ? 'r' : '-';
+  perm[6] = (type & OT_X) ? 'x' : '-';
+  perm[7] = (type & OT_W) ? 'w' : '-';
+  perm[8] = (type & GR_R) ? 'r' : '-';
+  perm[9] = (type & STIKY_BIT) ? 's' : '-';
+}
+
+char get_msg_by_inode_type(int inode_type) {
+  if (inode_type == INODE_TYPE_BLOCK_DEV) return 'b';
+  if (inode_type == INODE_TYPE_DIR) return 'd';
+  if (inode_type == INODE_TYPE_CHAR_DEV) return 'c';
+  if (inode_type == INODE_TYPE_FIFO) return 'f';
+  if (inode_type == INODE_TYPE_REG_FILE) return '-';
+  if (inode_type == INODE_TYPE_SOCKET) return 's';
+  if (inode_type == INODE_TYPE_SYM_LINK) return 'l';
+  perror("unknown type");
+  exit(1);
+}
 
 // function to fill super block by file discriptor from image
 int get_super_block(struct ext2_super_block *sb, int fd) {
@@ -129,6 +173,10 @@ void destroy_inode(Inode *inode) { free(inode); }
 
 int inode_get_type(const Inode *inode) { return INODE_TYPE_MASK & inode->type; }
 
+void inode_increment_idx(Inode *inode) { ++(inode->idx); }
+
+void inode_decriment_idx(Inode *inode) { --(inode->idx); }
+
 int inode_get_next_block(const Inode *inode) {
   if (inode->idx * get_block_size(inode->sb)) {
     return 0;
@@ -174,9 +222,9 @@ int inode_get_next_block(const Inode *inode) {
   return 0;
 }
 
-DirEntry *inode_get_next_dir_entry(const Inode *inode) {
+DirEntry *inode_get_next_dir_entry(Inode *inode) {
   DirEntry *dire = (DirEntry *)malloc(sizeof(DirEntry));
-  const int block = inode_get_next_block(inode);
+  int block = inode_get_next_block(inode);
 
   if (!block) {
     return NULL;
@@ -186,20 +234,121 @@ DirEntry *inode_get_next_dir_entry(const Inode *inode) {
   char buff[sizeof(int) + sizeof(short) + sizeof(char) * sizeof(char)];
 
   if (kBlockSize - inode->dire < sizeof(buff)) {
-    // continue;
+    if (pread(inode->fd, buff, kBlockSize - inode->dire,
+              inode->dire + block * kBlockSize) != kBlockSize - inode->dire) {
+      perror("pread: inode_get_next_dir_entry");
+      exit(1);
+    }
+    inode_increment_idx(inode);
+    block = inode_get_next_block(inode);
+    if (!block) {
+      return NULL;
+    }
+    if (pread(inode->fd, buff + kBlockSize - inode->dire,
+              sizeof(buff) - kBlockSize + inode->dire,
+              (0 + block) * kBlockSize) !=
+        sizeof(buff) - kBlockSize + inode->dire) {
+      perror("pread: inode_get_next_dir_entry");
+      exit(1);
+    }
+  } else {
+    if (pread(inode->fd, buff, sizeof(buff),
+              inode->dire + block * kBlockSize) != sizeof(buff)) {
+      perror("pread: inode_get_next_dir_entry");
+      exit(1);
+    }
   }
+
+  const int dir_entry_inode = *((int *)(buff + 0));
+  const short total_size = *((short *)(buff + 4));
+  const char lenght_low = *((char *)(buff + 6));
+  const char lenght_top = *((char *)(buff + 7));
+
+  const int len = (!get_dir_entry_type(inode->sb)) ? lenght_top : lenght_low;
+
+  char *name_buff = (char *)malloc(sizeof(char) * len);
+
+  block = inode_get_next_block(inode);
+  if (!block) {
+    perror("inode_get_next_block: inode_get_next_dir_entry");
+    exit(1);
+  }
+
+  const int kOffsetOfName = inode->dire + block * kBlockSize;
+  if (pread(inode->fd, name_buff, len, kOffsetOfName) != len) {
+    perror("pread: inode_get_next_dir_entry");
+    exit(1);
+  }
+
+  if ((inode->dire + total_size) / kBlockSize) {
+    inode_increment_idx(inode);
+  }
+
+  inode->dire = (inode->dire + total_size) % kBlockSize;
+
+  dire->num = dir_entry_inode;
+  dire->name = name_buff;
 
   return dire;
 }
 
-int inode_print_dir_entry(const Inode *inode) {
+void destroy_dir_entry(DirEntry *dir_entry) {
+  free(dir_entry->name);
+  free(dir_entry);
+}
+
+void inode_print_meta(Inode *inode) {
+  const int kInodeType = inode_get_type(inode);
+  char perms[12];
+  perms[11] = '\0';
+  perms[0] = get_msg_by_inode_type(kInodeType);
+  set_permission(perms + 1, kInodeType);
+  printf("%s", perms);
+}
+
+int inode_print_dir_entry(Inode *inode) {
   DirEntry *dir = inode_get_next_dir_entry(inode);
 
-  if (!dir) {
+  if (!dir || dir->num == 0) {
     return 0;
   }
 
-  return 0;
+  Inode *inner_inode = init_inode(inode->sb, inode->fd, dir->num);
+  inode_print_meta(inner_inode);
+  printf(" %s\n", dir->name);
+  const int kDirNum = dir->num;
+  destroy_dir_entry(dir);
+  destroy_inode(inner_inode);
+
+  return kDirNum;
+}
+
+int inode_print_data(Inode *inode) {
+  const int kBlockidx = inode_get_next_block(inode);
+  const int kBlockSize = get_block_size(inode->sb);
+
+  if (!kBlockidx || inode->idx * kBlockidx > inode->size) {
+    return 0;
+  }
+
+  const int kToReadLen = (inode->size - inode->idx * kBlockSize < kBlockSize)
+                             ? inode->size - inode->idx * kBlockSize
+                             : kBlockSize;
+
+  char *buff = (char *)malloc(sizeof(char) * kBlockSize);
+  const int kReaded =
+      pread(inode->fd, buff, kToReadLen, kBlockidx * kBlockSize);
+  if (errno) {
+    perror("pread: inode_print_data, errno");
+    exit(1);
+  }
+  if (write(STDOUT_FILENO, buff, kReaded) != kReaded || errno) {
+    perror("write: inode_print_data");
+    exit(1);
+  }
+  inode_increment_idx(inode);
+  free(buff);
+  return kReaded;
 }
 
 // ~INODE FUNCTIONS
@@ -213,6 +362,15 @@ void print_dir(const struct ext2_super_block *sb, int fd, int inode_num) {
   }
 
   while (inode_print_dir_entry(inode));
+
+  destroy_inode(inode);
+}
+
+void print_file(const struct ext2_super_block *sb, int fd, int inode_num) {
+  Inode *inode = init_inode(sb, fd, inode_num);
+  const int kBlockSize = get_block_size(sb);
+
+  while (inode_print_data(inode) == kBlockSize);
 
   destroy_inode(inode);
 }
