@@ -79,36 +79,42 @@ char get_msg_by_inode_type(int inode_type) {
 }
 
 // SUPER BLOCK GETTERS
-int get_block_size(struct ext2_super_block *sb) { return EXT2_BLOCK_SIZE(sb); }
+int get_block_size(const struct ext2_super_block *sb) {
+  return EXT2_BLOCK_SIZE(sb);
+}
 
-int get_inode_per_group(struct ext2_super_block *sb) {
+int get_inode_per_group(const struct ext2_super_block *sb) {
   return sb->s_inodes_per_group;
 }
 
-int get_block_per_group(struct ext2_super_block *sb) {
+int get_block_per_group(const struct ext2_super_block *sb) {
   return sb->s_blocks_per_group;
 }
 
-int get_blocks_count(struct ext2_super_block *sb) { return sb->s_blocks_count; }
+int get_blocks_count(const struct ext2_super_block *sb) {
+  return sb->s_blocks_count;
+}
 
-int get_major(struct ext2_super_block *sb) { return sb->s_rev_level; }
+int get_major(const struct ext2_super_block *sb) { return sb->s_rev_level; }
 
-int get_inode_size(struct ext2_super_block *sb) {
+int get_inode_size(const struct ext2_super_block *sb) {
   return get_major(sb) ? sb->s_inode_size : 128;
 }
 
-int get_inodes_count(struct ext2_super_block *sb) { return sb->s_inodes_count; }
+int get_inodes_count(const struct ext2_super_block *sb) {
+  return sb->s_inodes_count;
+}
 
-int get_dir_entry_type(struct ext2_super_block *sb) {
+int get_dir_entry_type(const struct ext2_super_block *sb) {
   return 0x002 & sb->s_feature_incompat;
 }
 
-int get_num_of_block_groups(struct ext2_super_block *sb) {
+int get_num_of_block_groups(const struct ext2_super_block *sb) {
   return (get_inodes_count(sb) + get_inode_per_group(sb) - 1) /
          get_inode_per_group(sb);
 }
 
-int get_block_group_descriptor_table_size(struct ext2_super_block *sb) {
+int get_block_group_descriptor_table_size(const struct ext2_super_block *sb) {
   return get_num_of_block_groups(sb) * 32;
 }
 // ~SUPER BLOCK GETTERS
@@ -509,4 +515,19 @@ int get_inode_from_path(const struct ext2_super_block *sb, const int fd,
   destroy_dir_entry(dir);
 
   return res;
+}
+
+void enumerate_blocks(const struct ext2_super_block *sb, const int fd,
+                      const int inode_num) {
+  Inode *inode = init_inode(sb, fd, inode_num);
+
+  printf("Inode number: %d\n", inode_num);
+
+  for (int block = inode_get_next_block(inode); block != 0;
+       block = inode_get_next_block(inode)) {
+    inode_increment_idx(inode);
+    printf("%d's block is %d\n", inode->idx, block);
+  }
+
+  printf("Total amount of blocks is %d\n", inode->idx);
 }

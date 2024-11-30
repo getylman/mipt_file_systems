@@ -10,4 +10,5 @@ void print_file(const struct ext2_super_block* sb, int fd, int inode_num);
 int get_inode_from_path(const struct ext2_super_block* sb, const int fd,
                         const char* path);
 // function to enumerate blocks
-void enumerateBlocks(const int inode);
+void enumerate_blocks(const struct ext2_super_block* sb, const int fd,
+                      const int inode_num);
