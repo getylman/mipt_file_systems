@@ -6,3 +6,8 @@ int get_super_block(struct ext2_super_block* sb, int fd);
 void print_dir(const struct ext2_super_block* sb, int fd, int inode_num);
 // function to print file by inode number
 void print_file(const struct ext2_super_block* sb, int fd, int inode_num);
+// function to get inode_num from path
+int get_inode_from_path(const struct ext2_super_block* sb, const int fd,
+                        const char* path);
+// function to enumerate blocks
+void enumerateBlocks(const int inode);

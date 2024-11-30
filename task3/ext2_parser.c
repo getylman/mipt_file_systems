@@ -47,6 +47,12 @@ typedef struct {
   char *name;
 } DirEntry;
 
+typedef struct {
+  size_t size;
+  size_t capacity;
+  char **tockens;
+} Tockens;
+
 void set_permission(char *perm, int type) {
   perm[0] = (type & US_X) ? 'x' : '-';
   perm[1] = (type & US_W) ? 'w' : '-';
@@ -70,16 +76,6 @@ char get_msg_by_inode_type(int inode_type) {
   if (inode_type == INODE_TYPE_SYM_LINK) return 'l';
   perror("unknown type");
   exit(1);
-}
-
-// function to fill super block by file discriptor from image
-int get_super_block(struct ext2_super_block *sb, int fd) {
-  const off_t kSBoffset = 1024;
-  if (pread(fd, sb, sizeof(*sb), kSBoffset) != sizeof(*sb)) {
-    perror("Ошибка чтения суперблока");
-    return 1;
-  }
-  return 0;
 }
 
 // SUPER BLOCK GETTERS
@@ -227,8 +223,11 @@ DirEntry *inode_get_next_dir_entry(Inode *inode) {
   int block = inode_get_next_block(inode);
 
   if (!block) {
+    free(dire);
     return NULL;
   }
+
+  dire->name = NULL;
 
   const int kBlockSize = get_block_size(inode->sb);
   char buff[sizeof(int) + sizeof(short) + sizeof(char) * sizeof(char)];
@@ -292,9 +291,11 @@ DirEntry *inode_get_next_dir_entry(Inode *inode) {
   return dire;
 }
 
-void destroy_dir_entry(DirEntry *dir_entry) {
-  free(dir_entry->name);
+int destroy_dir_entry(DirEntry *dir_entry) {
+  if (!dir_entry) return 0;
+  if (dir_entry->name) free(dir_entry->name);
   free(dir_entry);
+  return 1;
 }
 
 void inode_print_meta(Inode *inode) {
@@ -353,6 +354,99 @@ int inode_print_data(Inode *inode) {
 
 // ~INODE FUNCTIONS
 
+// SOME FUNCTIONS
+Tockens *split(const char *str, const char *delimiter) {
+  // Проверка на NULL-указатели
+  if (str == NULL || delimiter == NULL) {
+    return NULL;
+  }
+
+  // Выделение памяти для структуры Tockens
+  Tockens *tokens = (Tockens *)malloc(sizeof(Tockens));
+  if (tokens == NULL) {
+    perror("malloc");
+    return NULL;
+  }
+  tokens->capacity = 1;  // Начальная вместимость - 1 токен
+  tokens->size = 0;
+  tokens->tockens = (char **)malloc(tokens->capacity * sizeof(char *));
+  if (tokens->tockens == NULL) {
+    perror("malloc");
+    free(tokens);
+    return NULL;
+  }
+
+  char *token;
+  char *str_copy = strdup(
+      str);  // Создаем копию строки, чтобы избежать модификации оригинала
+
+  if (str_copy == NULL) {
+    perror("strdup");
+    free(tokens->tockens);
+    free(tokens);
+    return NULL;
+  }
+
+  token = strtok(str_copy, delimiter);  // Разбиваем строку на токены
+
+  while (token != NULL) {
+    // Если массив токенов заполнен, увеличиваем его размер
+    if (tokens->size >= tokens->capacity) {
+      tokens->capacity *= 2;  // Удваиваем вместимость
+      tokens->tockens =
+          (char **)realloc(tokens->tockens, tokens->capacity * sizeof(char *));
+      if (tokens->tockens == NULL) {
+        perror("realloc");
+        free(str_copy);
+        free(tokens);
+        return NULL;
+      }
+    }
+
+    // Выделяем память для токена и копируем его
+    tokens->tockens[tokens->size] = strdup(token);
+    if (tokens->tockens[tokens->size] == NULL) {
+      perror("strdup");
+      for (size_t i = 0; i < tokens->size; i++) {
+        free(tokens->tockens[i]);
+      }
+      free(tokens->tockens);
+      free(str_copy);
+      free(tokens);
+      return NULL;
+    }
+
+    tokens->size++;
+    token = strtok(NULL, delimiter);
+  }
+
+  free(str_copy);  // Освобождаем память, выделенную под копию строки
+
+  return tokens;
+}
+
+void destroy_tokens(Tockens *tokens) {
+  if (tokens != NULL) {
+    for (size_t i = 0; i < tokens->size; i++) {
+      free(tokens->tockens[i]);
+    }
+    free(tokens->tockens);
+    free(tokens);
+  }
+}
+
+// ~SOME FUNCTIONS
+
+// function to fill super block by file discriptor from image
+int get_super_block(struct ext2_super_block *sb, int fd) {
+  const off_t kSBoffset = 1024;
+  if (pread(fd, sb, sizeof(*sb), kSBoffset) != sizeof(*sb)) {
+    perror("Ошибка чтения суперблока");
+    return 1;
+  }
+  return 0;
+}
+
 void print_dir(const struct ext2_super_block *sb, int fd, int inode_num) {
   Inode *inode = init_inode(sb, fd, inode_num);
 
@@ -373,4 +467,46 @@ void print_file(const struct ext2_super_block *sb, int fd, int inode_num) {
   while (inode_print_data(inode) == kBlockSize);
 
   destroy_inode(inode);
+}
+
+int get_inode_from_path(const struct ext2_super_block *sb, const int fd,
+                        const char *path) {
+  const char delimiter[] = "/";
+  const int kRootInode = 2;
+  Tockens *names = split(path, delimiter);
+
+  Inode *inode = init_inode(sb, fd, kRootInode);
+
+  DirEntry *dir;
+
+  for (size_t i = 0; i < names->size; ++i) {
+    do {
+      dir = inode_get_next_dir_entry(inode);
+    } while (dir->num != 0 && strcmp(dir->name, names->tockens[i]) &&
+             (destroy_dir_entry(dir) || 1));
+
+    if (!strcmp(dir->name, names->tockens[i])) {
+      destroy_inode(inode);
+      destroy_dir_entry(dir);
+      return -1;
+    }
+
+    destroy_inode(inode);
+    inode = init_inode(sb, fd, dir->num);
+    if (i != names->size && inode_get_type(inode) != INODE_TYPE_DIR) {
+      destroy_inode(inode);
+      destroy_dir_entry(dir);
+      return -1;
+    }
+    if (i + 1 != names->size) {
+      destroy_dir_entry(dir);
+    }
+  }
+
+  destroy_inode(inode);
+  destroy_tokens(names);
+  const int res = dir->num;
+  destroy_dir_entry(dir);
+
+  return res;
 }
