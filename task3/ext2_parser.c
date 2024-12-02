@@ -39,7 +39,7 @@ typedef struct {
   int block_ptrs[3];
   int dir_block[12];
   size_t dire;
-  struct ext2_super_block *sb;
+  const struct ext2_super_block *sb;
 } Inode;
 
 typedef struct {
@@ -453,6 +453,16 @@ int get_super_block(struct ext2_super_block *sb, int fd) {
   return 0;
 }
 
+int get_group_desc(struct ext2_group_desc *gd, const int fd,
+                   const int block_size) {
+  const off_t kGDoffset = 1024 + block_size;
+  if (pread(fd, gd, sizeof(*gd), kGDoffset) != sizeof(*gd)) {
+    perror("pread: get_group_desc");
+    return 1;
+  }
+  return 0;
+}
+
 void print_dir(const struct ext2_super_block *sb, int fd, int inode_num) {
   Inode *inode = init_inode(sb, fd, inode_num);
 
@@ -526,8 +536,8 @@ void enumerate_blocks(const struct ext2_super_block *sb, const int fd,
   for (int block = inode_get_next_block(inode); block != 0;
        block = inode_get_next_block(inode)) {
     inode_increment_idx(inode);
-    printf("%d's block is %d\n", inode->idx, block);
+    printf("%ld's block is %d\n", inode->idx, block);
   }
 
-  printf("Total amount of blocks is %d\n", inode->idx);
+  printf("Total amount of blocks is %ld\n", inode->idx);
 }
